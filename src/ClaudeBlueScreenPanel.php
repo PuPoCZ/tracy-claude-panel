@@ -12,24 +12,19 @@ use Tracy\Helpers;
  *
  * Generates a structured, copy-paste-ready error summary optimized for
  * Claude Code and other AI coding assistants.
- *
- * Features:
- * - Error type, message, file, line
- * - HTTP method + URL
- * - Nette presenter:action (via Application event, mapping-independent)
- * - Latte template source resolution (compiled PHP → original .latte)
- * - Doctrine SQL query extraction from DBAL exceptions
- * - Source code snippet with error line marker
- * - Filtered call stack (app files only, no vendor noise)
- * - Chained exception support
  */
 final class ClaudeBlueScreenPanel
 {
 	private string $appDir;
 	private string $rootDir;
 
-	/** Captured by Application::$onRequest event */
 	private static ?string $lastPresenterAction = null;
+
+	/** @var array<string, ?string> */
+	private array $latteSourceCache = [];
+
+	/** @var array<string, ?list<string>> */
+	private array $fileContentCache = [];
 
 	public function __construct(string $appDir)
 	{
@@ -39,7 +34,6 @@ final class ClaudeBlueScreenPanel
 
 	/**
 	 * Register the panel on Tracy BlueScreen.
-	 * This is the only method you need to call for standalone (non-Nette) usage.
 	 *
 	 * @param string $appDir Absolute path to your application source directory (e.g. __DIR__ . '/app')
 	 */
@@ -63,8 +57,6 @@ final class ClaudeBlueScreenPanel
 	}
 
 	/**
-	 * Tracy BlueScreen panel callback.
-	 *
 	 * @return array{tab: string, panel: string, collapsed: bool}|null
 	 */
 	public function renderPanel(?\Throwable $e): ?array
@@ -74,7 +66,7 @@ final class ClaudeBlueScreenPanel
 		}
 
 		$summary = $this->buildSummary($e);
-		$escapedSummary = htmlspecialchars($summary, ENT_QUOTES, 'UTF-8');
+		$escapedSummary = Helpers::escapeHtml($summary);
 
 		$panel = <<<HTML
 		<div id="tracy-claude-panel">
@@ -103,42 +95,32 @@ final class ClaudeBlueScreenPanel
 	{
 		$lines = [];
 
-		// Error type + message
 		$type = $e instanceof \ErrorException
 			? Helpers::errorTypeToString($e->getSeverity())
 			: get_debug_type($e);
-
 		$lines[] = "Error: {$type} — {$e->getMessage()}";
 
-		// URL + HTTP method
 		$url = $this->getCurrentUrl();
 		if ($url !== null) {
 			$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 			$lines[] = "URL: {$method} {$url}";
 		}
 
-		// Presenter:action (Nette)
 		$presenterAction = $this->detectPresenterAction($e);
 		if ($presenterAction !== null) {
 			$lines[] = "Presenter: {$presenterAction}";
 		}
 
-		// File + line — for Latte errors, resolve to .latte source
 		$sourceFile = $e->getFile();
 		$sourceLine = $e->getLine();
-		$latteSource = $this->detectLatteSource($e->getFile());
-
-		if ($latteSource !== null) {
-			$latteLine = $this->mapCompiledLineToLatte($e->getFile(), $e->getLine());
-			if ($latteLine !== null) {
-				$sourceFile = $latteSource;
-				$sourceLine = $latteLine;
-			}
+		$resolved = $this->resolveLatteSource($sourceFile, $sourceLine);
+		if ($resolved !== null) {
+			$sourceFile = $resolved['file'];
+			$sourceLine = $resolved['line'];
 		}
 
 		$lines[] = "File: {$this->relativePath($sourceFile)}:{$sourceLine}";
 
-		// Source code snippet
 		$source = $this->getSourceSnippet($sourceFile, $sourceLine, 4);
 		if ($source !== null) {
 			$lines[] = '';
@@ -146,14 +128,12 @@ final class ClaudeBlueScreenPanel
 			$lines[] = $source;
 		}
 
-		// Doctrine SQL query
 		$sql = $this->extractDoctrineQuery($e);
 		if ($sql !== null) {
 			$lines[] = '';
 			$lines[] = "SQL: {$sql}";
 		}
 
-		// Filtered call stack (app files only)
 		$stack = $this->getFilteredStack($e);
 		if ($stack !== []) {
 			$lines[] = '';
@@ -163,9 +143,8 @@ final class ClaudeBlueScreenPanel
 			}
 		}
 
-		// Caused by (recursive)
-		$prev = $e->getPrevious();
-		while ($prev !== null) {
+		// Chained exceptions (with circular chain protection via Tracy)
+		foreach (array_slice(Helpers::getExceptionChain($e), 1) as $prev) {
 			$prevType = get_debug_type($prev);
 			$prevFile = $this->relativePath($prev->getFile());
 			$lines[] = '';
@@ -176,8 +155,6 @@ final class ClaudeBlueScreenPanel
 			if ($prevSql !== null) {
 				$lines[] = "  SQL: {$prevSql}";
 			}
-
-			$prev = $prev->getPrevious();
 		}
 
 		return implode("\n", $lines);
@@ -185,7 +162,7 @@ final class ClaudeBlueScreenPanel
 
 	private function getCurrentUrl(): ?string
 	{
-		if (PHP_SAPI === 'cli') {
+		if (PHP_SAPI === 'cli' || PHP_SAPI === 'phpdbg') {
 			return null;
 		}
 
@@ -193,7 +170,6 @@ final class ClaudeBlueScreenPanel
 		$host = $_SERVER['HTTP_HOST'] ?? $_SERVER['SERVER_NAME'] ?? 'localhost';
 		$uri = $_SERVER['REQUEST_URI'] ?? '/';
 
-		// Strip Tracy debug params for cleaner URL
 		$uri = preg_replace('/[?&]_fid=[^&]*/', '', $uri) ?? $uri;
 		$uri = preg_replace('/\?$/', '', $uri) ?? $uri;
 
@@ -210,9 +186,8 @@ final class ClaudeBlueScreenPanel
 	}
 
 	/**
-	 * Detect Nette presenter:action.
-	 * Primary: value captured by Application::$onRequest event (universal, mapping-independent).
-	 * Fallback: find Presenter object in stack trace.
+	 * Uses value captured by Application::$onRequest event (universal, mapping-independent).
+	 * Falls back to finding Presenter object in stack trace.
 	 */
 	private function detectPresenterAction(\Throwable $e): ?string
 	{
@@ -220,7 +195,6 @@ final class ClaudeBlueScreenPanel
 			return self::$lastPresenterAction;
 		}
 
-		// Fallback: find Presenter object in stack trace
 		if (!class_exists(\Nette\Application\UI\Presenter::class, false)) {
 			return null;
 		}
@@ -240,43 +214,53 @@ final class ClaudeBlueScreenPanel
 	}
 
 	/**
+	 * Resolve compiled Latte PHP file + line to original .latte source.
+	 * @return array{file: string, line: int}|null
+	 */
+	private function resolveLatteSource(string $file, int $line): ?array
+	{
+		$latteSource = $this->detectLatteSource($file);
+		if ($latteSource === null) {
+			return null;
+		}
+
+		$latteLine = $this->mapCompiledLineToLatte($file, $line);
+		return $latteLine !== null ? ['file' => $latteSource, 'line' => $latteLine] : null;
+	}
+
+	/**
 	 * Detect original .latte file from compiled Latte PHP.
-	 * Compiled files contain: /** source: /path/to/file.latte *​/
+	 * Results are cached per file path.
 	 */
 	private function detectLatteSource(string $file): ?string
 	{
-		if (!is_file($file) || !is_readable($file)) {
+		if (array_key_exists($file, $this->latteSourceCache)) {
+			return $this->latteSourceCache[$file];
+		}
+
+		$result = $this->doDetectLatteSource($file);
+		$this->latteSourceCache[$file] = $result;
+		return $result;
+	}
+
+	private function doDetectLatteSource(string $file): ?string
+	{
+		if (!$this->isLikelyCompiledLatte($file)) {
 			return null;
 		}
 
-		// Quick check — only process files that could be compiled Latte
-		if (!str_contains($file, 'latte') && !str_contains($file, 'temp')) {
+		$lines = $this->readFileLines($file);
+		if ($lines === null) {
 			return null;
 		}
 
-		// Already a .latte file
-		if (str_ends_with($file, '.latte')) {
-			return null;
-		}
-
-		$handle = fopen($file, 'r');
-		if ($handle === false) {
-			return null;
-		}
-
-		$latteSource = null;
-		$lineCount = 0;
-		while (($line = fgets($handle)) !== false && $lineCount < 15) {
-			if (preg_match('#/\*\*\s*source:\s*(.+\.latte)\s*\*/#', $line, $m)) {
+		// Source comment is always near the top of compiled Latte files
+		$limit = min(15, count($lines));
+		for ($i = 0; $i < $limit; $i++) {
+			if (preg_match('#/\*\*\s*source:\s*(.+\.latte)\s*\*/#', $lines[$i], $m)) {
 				$latteSource = trim($m[1]);
-				break;
+				return is_file($latteSource) ? $latteSource : null;
 			}
-			$lineCount++;
-		}
-		fclose($handle);
-
-		if ($latteSource !== null && is_file($latteSource)) {
-			return $latteSource;
 		}
 
 		return null;
@@ -284,26 +268,19 @@ final class ClaudeBlueScreenPanel
 
 	/**
 	 * Map a line in compiled Latte PHP to original .latte line.
-	 * Latte 3: /* pos 4:1 *​/ (line:column)
-	 * Latte 2: /* line 42 *​/
+	 * Latte 3: /* pos 4:1 *​/ — Latte 2: /* line 42 *​/
 	 */
 	private function mapCompiledLineToLatte(string $file, int $phpLine): ?int
 	{
-		if (!is_file($file) || !is_readable($file)) {
+		$content = $this->readFileLines($file);
+		if ($content === null) {
 			return null;
 		}
 
-		$content = file($file);
-		if ($content === false) {
-			return null;
-		}
+		$from = min($phpLine - 1, count($content) - 1);
+		$to = max(0, $phpLine - 10);
 
-		$searchRange = range(
-			min($phpLine - 1, count($content) - 1),
-			max(0, $phpLine - 10),
-		);
-
-		foreach ($searchRange as $i) {
+		for ($i = $from; $i >= $to; $i--) {
 			if (!isset($content[$i])) {
 				continue;
 			}
@@ -318,9 +295,6 @@ final class ClaudeBlueScreenPanel
 		return null;
 	}
 
-	/**
-	 * Extract SQL query from Doctrine DBAL exceptions.
-	 */
 	private function extractDoctrineQuery(\Throwable $e): ?string
 	{
 		if (!class_exists(\Doctrine\DBAL\Exception\DriverException::class, false)) {
@@ -348,12 +322,8 @@ final class ClaudeBlueScreenPanel
 
 	private function getSourceSnippet(string $file, int $line, int $context): ?string
 	{
-		if (!is_file($file) || !is_readable($file)) {
-			return null;
-		}
-
-		$content = file($file);
-		if ($content === false) {
+		$content = $this->readFileLines($file);
+		if ($content === null) {
 			return null;
 		}
 
@@ -386,30 +356,24 @@ final class ClaudeBlueScreenPanel
 			}
 
 			$file = $frame['file'];
-
 			$isAppFile = str_starts_with($file, $this->appDir);
-			$isLatteCompiled = str_contains($file, '/temp/cache/latte/')
-				|| str_contains($file, '\\temp\\cache\\latte\\');
+			$isLatteCompiled = $this->isLikelyCompiledLatte($file);
 
 			if (!$isAppFile && !$isLatteCompiled) {
 				continue;
 			}
 
 			$relativePath = $this->relativePath($file);
-			$line = $frame['line'] ?? '?';
+			$line = $frame['line'] ?? 0;
 
 			if ($isLatteCompiled) {
-				$latteSource = $this->detectLatteSource($file);
-				if ($latteSource !== null) {
-					$relativePath = $this->relativePath($latteSource);
-					$latteLine = $this->mapCompiledLineToLatte($file, is_int($line) ? $line : 0);
-					if ($latteLine !== null) {
-						$line = $latteLine;
-					}
+				$resolved = $this->resolveLatteSource($file, $line);
+				if ($resolved !== null) {
+					$relativePath = $this->relativePath($resolved['file']);
+					$line = $resolved['line'];
 				}
 			}
 
-			$call = '';
 			if (isset($frame['class'])) {
 				$shortClass = $this->shortClassName($frame['class']);
 				$call = " {$shortClass}::{$frame['function']}()";
@@ -423,14 +387,37 @@ final class ClaudeBlueScreenPanel
 		return $result;
 	}
 
+	private function isLikelyCompiledLatte(string $file): bool
+	{
+		if (str_ends_with($file, '.latte')) {
+			return false;
+		}
+
+		return str_contains($file, '/latte/') || str_contains($file, '\\latte\\');
+	}
+
+	/**
+	 * Read file lines with caching. Returns null on failure.
+	 * @return list<string>|null
+	 */
+	private function readFileLines(string $file): ?array
+	{
+		if (array_key_exists($file, $this->fileContentCache)) {
+			return $this->fileContentCache[$file];
+		}
+
+		$content = @file($file);
+		$result = $content !== false ? $content : null;
+		$this->fileContentCache[$file] = $result;
+		return $result;
+	}
+
 	private function shortClassName(string $class): string
 	{
-		// For compiled Latte templates (Template_xxxx), simplify
 		if (preg_match('/^Template_[a-f0-9]+$/', $class)) {
 			return 'LatteTemplate';
 		}
 
-		// Use short class name
 		$pos = strrpos($class, '\\');
 		return $pos !== false ? substr($class, $pos + 1) : $class;
 	}
