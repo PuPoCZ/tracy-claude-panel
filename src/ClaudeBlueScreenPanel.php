@@ -113,14 +113,15 @@ final class ClaudeBlueScreenPanel
 
 		$sourceFile = $e->getFile();
 		$sourceLine = $e->getLine();
+		$errorFrame = null;
 
 		// If error originates in vendor (e.g. trigger_error inside Nette),
 		// find the first app frame in the stack trace — that's where the real problem is
 		if (!str_starts_with($sourceFile, $this->appDir)) {
-			$appFrame = $this->findFirstAppFrame($e);
-			if ($appFrame !== null) {
-				$sourceFile = $appFrame['file'];
-				$sourceLine = $appFrame['line'];
+			$errorFrame = $this->findFirstAppFrame($e);
+			if ($errorFrame !== null) {
+				$sourceFile = $errorFrame['file'];
+				$sourceLine = $errorFrame['line'];
 			}
 		}
 
@@ -137,6 +138,15 @@ final class ClaudeBlueScreenPanel
 			$lines[] = '';
 			$lines[] = 'Source:';
 			$lines[] = $source;
+		}
+
+		// Show arguments of the error frame when it was resolved from vendor
+		if ($errorFrame !== null) {
+			$argsStr = $this->formatFrameArgs($errorFrame);
+			if ($argsStr !== null) {
+				$lines[] = '';
+				$lines[] = $argsStr;
+			}
 		}
 
 		$sql = $this->extractDoctrineQuery($e);
@@ -198,7 +208,8 @@ final class ClaudeBlueScreenPanel
 
 	/**
 	 * Find the first stack frame that points to an app file (not vendor).
-	 * @return array{file: string, line: int}|null
+	 * Returns full frame data including args for context.
+	 * @return array{file: string, line: int, function?: string, class?: string, args?: list<mixed>}|null
 	 */
 	private function findFirstAppFrame(\Throwable $e): ?array
 	{
@@ -208,7 +219,7 @@ final class ClaudeBlueScreenPanel
 			}
 
 			if (str_starts_with($frame['file'], $this->appDir) || $this->isLikelyCompiledLatte($frame['file'])) {
-				return ['file' => $frame['file'], 'line' => $frame['line']];
+				return $frame;
 			}
 		}
 
@@ -441,6 +452,67 @@ final class ClaudeBlueScreenPanel
 		$result = $content !== false ? $content : null;
 		$this->fileContentCache[$file] = $result;
 		return $result;
+	}
+
+	/**
+	 * Format function arguments from a stack frame for display.
+	 * Shows the called function with its argument values.
+	 */
+	private function formatFrameArgs(array $frame): ?string
+	{
+		$args = $frame['args'] ?? [];
+		if ($args === []) {
+			return null;
+		}
+
+		$call = '';
+		if (isset($frame['class'])) {
+			$call = $this->shortClassName($frame['class']) . '::' . $frame['function'];
+		} elseif (isset($frame['function'])) {
+			$call = $frame['function'];
+		}
+
+		$formattedArgs = [];
+		foreach ($args as $arg) {
+			$formattedArgs[] = $this->formatArgValue($arg);
+		}
+
+		return "Args: {$call}(" . implode(', ', $formattedArgs) . ')';
+	}
+
+	private function formatArgValue(mixed $value, int $depth = 0): string
+	{
+		if ($value === null) {
+			return 'null';
+		}
+		if (is_bool($value)) {
+			return $value ? 'true' : 'false';
+		}
+		if (is_int($value) || is_float($value)) {
+			return (string) $value;
+		}
+		if (is_string($value)) {
+			if (strlen($value) > 100) {
+				$value = substr($value, 0, 100) . '...';
+			}
+			return "'" . addcslashes($value, "'\\") . "'";
+		}
+		if (is_array($value)) {
+			if ($depth > 0 || count($value) > 10) {
+				return 'array(' . count($value) . ')';
+			}
+			$items = [];
+			foreach ($value as $k => $v) {
+				$key = is_string($k) ? "'{$k}'" : $k;
+				$items[] = "{$key}: " . $this->formatArgValue($v, $depth + 1);
+			}
+			return '[' . implode(', ', $items) . ']';
+		}
+		if (is_object($value)) {
+			return $this->shortClassName(get_class($value));
+		}
+
+		return get_debug_type($value);
 	}
 
 	private function shortClassName(string $class): string
