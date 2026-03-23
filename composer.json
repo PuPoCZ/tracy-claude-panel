@@ -1,0 +1,38 @@
+{
+	"name": "pupocz/tracy-claude-panel",
+	"description": "Tracy BlueScreen panel that formats errors for AI-assisted debugging. One-click error export to Claude Code and other AI coding assistants.",
+	"type": "library",
+	"license": "MIT",
+	"keywords": ["tracy", "claude", "ai", "debugging", "nette", "bluescreen", "error", "panel"],
+	"authors": [
+		{
+			"name": "Jaroslav Pokorný",
+			"email": "info@pupoweb.cz"
+		}
+	],
+	"require": {
+		"php": ">=8.1",
+		"tracy/tracy": "^2.10"
+	},
+	"suggest": {
+		"nette/application": "For automatic presenter:action detection",
+		"nette/di": "For zero-config registration via DI extension",
+		"doctrine/dbal": "For SQL query extraction from Doctrine exceptions",
+		"latte/latte": "For Latte template source resolution"
+	},
+	"autoload": {
+		"psr-4": {
+			"PuPoC\\TracyClaudePanel\\": "src/"
+		}
+	},
+	"extra": {
+		"nette": {
+			"extensions": {
+				"tracyClaudePanel": "PuPoC\\TracyClaudePanel\\Bridge\\Nette\\TracyClaudePanelExtension"
+			}
+		}
+	},
+	"config": {
+		"sort-packages": true
+	}
+}
