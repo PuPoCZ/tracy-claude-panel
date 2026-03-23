@@ -113,6 +113,17 @@ final class ClaudeBlueScreenPanel
 
 		$sourceFile = $e->getFile();
 		$sourceLine = $e->getLine();
+
+		// If error originates in vendor (e.g. trigger_error inside Nette),
+		// find the first app frame in the stack trace — that's where the real problem is
+		if (!str_starts_with($sourceFile, $this->appDir)) {
+			$appFrame = $this->findFirstAppFrame($e);
+			if ($appFrame !== null) {
+				$sourceFile = $appFrame['file'];
+				$sourceLine = $appFrame['line'];
+			}
+		}
+
 		$resolved = $this->resolveLatteSource($sourceFile, $sourceLine);
 		if ($resolved !== null) {
 			$sourceFile = $resolved['file'];
@@ -183,6 +194,25 @@ final class ClaudeBlueScreenPanel
 		}
 
 		return $path;
+	}
+
+	/**
+	 * Find the first stack frame that points to an app file (not vendor).
+	 * @return array{file: string, line: int}|null
+	 */
+	private function findFirstAppFrame(\Throwable $e): ?array
+	{
+		foreach ($e->getTrace() as $frame) {
+			if (!isset($frame['file'], $frame['line'])) {
+				continue;
+			}
+
+			if (str_starts_with($frame['file'], $this->appDir) || $this->isLikelyCompiledLatte($frame['file'])) {
+				return ['file' => $frame['file'], 'line' => $frame['line']];
+			}
+		}
+
+		return null;
 	}
 
 	/**
