@@ -393,7 +393,8 @@ final class ClaudeBlueScreenPanel
 			return false;
 		}
 
-		return str_contains($file, '/latte/') || str_contains($file, '\\latte\\');
+		// Match compiled Latte cache dirs, not vendor/latte/ source files
+		return str_contains($file, '/cache/latte/') || str_contains($file, '\\cache\\latte\\');
 	}
 
 	/**
