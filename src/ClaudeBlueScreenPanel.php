@@ -115,9 +115,15 @@ final class ClaudeBlueScreenPanel
 		$sourceLine = $e->getLine();
 		$errorFrame = null;
 
+		// For Latte compile errors, the source .latte file is in the exception metadata
+		$latteSource = $this->resolveLatteCompileError($e);
+		if ($latteSource !== null) {
+			$sourceFile = $latteSource['file'];
+			$sourceLine = $latteSource['line'];
+		}
 		// If error originates in vendor (e.g. trigger_error inside Nette),
 		// find the first app frame in the stack trace — that's where the real problem is
-		if (!str_starts_with($sourceFile, $this->appDir)) {
+		elseif (!str_starts_with($sourceFile, $this->appDir)) {
 			$errorFrame = $this->findFirstAppFrame($e);
 			if ($errorFrame !== null) {
 				$sourceFile = $errorFrame['file'];
@@ -125,6 +131,7 @@ final class ClaudeBlueScreenPanel
 			}
 		}
 
+		// Resolve compiled Latte cache -> original .latte source
 		$resolved = $this->resolveLatteSource($sourceFile, $sourceLine);
 		if ($resolved !== null) {
 			$sourceFile = $resolved['file'];
@@ -248,6 +255,32 @@ final class ClaudeBlueScreenPanel
 				if ($name !== null) {
 					return "{$name}:{$action}";
 				}
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Extract source .latte file and line from Latte CompileException.
+	 * Handles both Latte 2 (sourceName property) and Latte 3 (message parsing).
+	 * @return array{file: string, line: int}|null
+	 */
+	private function resolveLatteCompileError(\Throwable $e): ?array
+	{
+		// Latte 2: sourceName + sourceLine properties
+		if (property_exists($e, 'sourceName') && property_exists($e, 'sourceLine')) {
+			$file = $e->sourceName;
+			$line = $e->sourceLine;
+			if (is_string($file) && is_int($line) && is_file($file)) {
+				return ['file' => $file, 'line' => $line];
+			}
+		}
+
+		// Parse message for: (in '/path/to/template.latte' on line N ...)
+		if (preg_match("/\\(in '(.+\\.latte)' on line (\\d+)/", $e->getMessage(), $m)) {
+			if (is_file($m[1])) {
+				return ['file' => $m[1], 'line' => (int) $m[2]];
 			}
 		}
 
