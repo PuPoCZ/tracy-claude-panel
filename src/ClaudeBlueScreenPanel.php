@@ -39,6 +39,12 @@ final class ClaudeBlueScreenPanel
 	 */
 	public static function register(string $appDir): void
 	{
+		static $registered = false;
+		if ($registered) {
+			return;
+		}
+		$registered = true;
+
 		$panel = new self($appDir);
 		Debugger::getBlueScreen()->addPanel([$panel, 'renderPanel']);
 	}

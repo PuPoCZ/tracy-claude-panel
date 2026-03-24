@@ -24,6 +24,14 @@ final class TracyClaudePanelExtension extends CompilerExtension
 			return;
 		}
 
+		// Register panel immediately so it catches errors during container compilation
+		// (e.g. CompileError when autoloading a class with property conflicts).
+		// The afterCompile registration handles normal requests from cached container.
+		$appDir = $this->getContainerBuilder()->parameters['appDir'] ?? null;
+		if (is_string($appDir)) {
+			ClaudeBlueScreenPanel::register($appDir);
+		}
+
 		$builder = $this->getContainerBuilder();
 		$applicationName = $builder->getByType(\Nette\Application\Application::class);
 
