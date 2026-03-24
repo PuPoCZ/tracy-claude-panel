@@ -18,7 +18,7 @@ use PuPoC\TracyClaudePanel\ClaudeBlueScreenPanel;
  */
 final class TracyClaudePanelExtension extends CompilerExtension
 {
-	public function beforeCompile(): void
+	public function loadConfiguration(): void
 	{
 		if (!$this->isDebugMode()) {
 			return;
@@ -26,10 +26,16 @@ final class TracyClaudePanelExtension extends CompilerExtension
 
 		// Register panel immediately so it catches errors during container compilation
 		// (e.g. CompileError when autoloading a class with property conflicts).
-		// The afterCompile registration handles normal requests from cached container.
 		$appDir = $this->getContainerBuilder()->parameters['appDir'] ?? null;
 		if (is_string($appDir)) {
 			ClaudeBlueScreenPanel::register($appDir);
+		}
+	}
+
+	public function beforeCompile(): void
+	{
+		if (!$this->isDebugMode()) {
+			return;
 		}
 
 		$builder = $this->getContainerBuilder();
@@ -49,11 +55,19 @@ final class TracyClaudePanelExtension extends CompilerExtension
 			return;
 		}
 
+		$appDir = $this->getContainerBuilder()->parameters['appDir'] ?? '%appDir%';
+
+		// Prepend panel registration to run before any other initialization code.
+		// Using addBody() would append after other extensions, risking that their
+		// init code triggers autoloading (and a CompileError) before our panel exists.
 		$initialize = $class->getMethod('initialize');
+		$existingBody = $initialize->getBody();
+		$initialize->setBody('');
 		$initialize->addBody(
 			ClaudeBlueScreenPanel::class . '::register(?);',
-			[$this->getContainerBuilder()->parameters['appDir'] ?? '%appDir%'],
+			[$appDir],
 		);
+		$initialize->addBody($existingBody);
 	}
 
 	private function isDebugMode(): bool
